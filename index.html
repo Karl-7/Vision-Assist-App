@@ -38,9 +38,7 @@ canvas{display:none;}
   box-shadow:0 0 0 8px rgba(61,139,253,0.15);
   transition:background .15s, box-shadow .15s, transform .1s;
 }
-#btn.btn-blue{background:var(--accent); box-shadow:0 0 0 8px rgba(51, 130, 249, 0.15);}
-#btn.btn-red{background:var(--accent-active); box-shadow:0 0 0 14px rgba(229,72,77,0.2);}
-#btn.active{transform:scale(0.97);}
+#btn.active{background:var(--accent-active); box-shadow:0 0 0 14px rgba(229,72,77,0.2); transform:scale(0.97);}
 #box{
   width:100%; min-height:140px; background:var(--card); border-radius:14px;
   padding:16px; font-size:16px; line-height:1.5; white-space:pre-wrap;
@@ -58,8 +56,6 @@ canvas{display:none;}
 <div class="sub">按住大按钮说出你的问题，松开即可</div>
 
 <div class="settings">
-  <label>后端地址（部署后端后填入，例如 https://xxx.onrender.com/analyze）</label>
-  <input id="backendUrl" type="text" placeholder="https://your-backend.onrender.com/analyze">
   <label>摄像头</label>
   <select id="facing">
     <option value="environment">后置摄像头</option>
@@ -82,15 +78,13 @@ const box = document.getElementById('box');
 const statusEl = document.getElementById('status');
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
-const backendUrlInput = document.getElementById('backendUrl');
 const facingSelect = document.getElementById('facing');
+const BACKEND_URL = 'https://vision-assist-backend-c6b9.onrender.com/analyze';
 
 // persist settings locally (per-device convenience only)
 try{
-  backendUrlInput.value = localStorage.getItem('va_backend') || '';
   facingSelect.value = localStorage.getItem('va_facing') || 'environment';
 }catch(e){}
-backendUrlInput.addEventListener('change', ()=>{ try{ localStorage.setItem('va_backend', backendUrlInput.value); }catch(e){} });
 facingSelect.addEventListener('change', ()=>{ try{ localStorage.setItem('va_facing', facingSelect.value); }catch(e){} });
 
 let stream = null;
@@ -180,8 +174,6 @@ function stopRecognition(){
 
 async function handleUtterance(text){
   if(busy) return;
-  const backendUrl = backendUrlInput.value.trim();
-  if(!backendUrl){ setStatus('请先填写后端地址'); return; }
   if(!latestFrame){ setStatus('还未获取到画面，请稍等'); return; }
   busy = true;
   setStatus('正在分析画面…');
@@ -191,7 +183,7 @@ async function handleUtterance(text){
   const base64Data = latestFrame.split(',')[1]; // strip "data:image/jpeg;base64,"
 
   try{
-    const resp = await fetch(backendUrl, {
+    const resp = await fetch(BACKEND_URL, {
       method:'POST',
       headers:{ 'Content-Type':'application/json' },
       body: JSON.stringify({
@@ -256,18 +248,11 @@ function onHoldEnd(e){
   setStatus('已停止');
 }
 
-async function toggleHold(e){
-  e.preventDefault();
-  if(holding){
-    onHoldEnd(e);
-  }else{
-    await onHoldStart(e);
-  }
-}
-
-btn.addEventListener('click', toggleHold);
+btn.addEventListener('mousedown', onHoldStart);
+btn.addEventListener('touchstart', onHoldStart, {passive:false});
+window.addEventListener('mouseup', onHoldEnd);
+window.addEventListener('touchend', onHoldEnd);
+window.addEventListener('touchcancel', onHoldEnd);
 </script>
 </body>
 </html>
-
- rmdir /s /q .git git init git add index.html git commit -m "Frontend only, clean history" git branch -M main git remote add origin https://github.com/Karl-7/Vision-Assist-App.git git push -f origin main
