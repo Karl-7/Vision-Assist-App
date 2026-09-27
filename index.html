@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>视觉助手</title>
+<title>Vision Assist</title>
 <style>
 :root{
   --bg:#0b0b10; --fg:#f4f4f6; --accent:#3d8bfd; --accent-active:#e5484d;
@@ -52,21 +52,21 @@ canvas{display:none;}
 </style>
 </head>
 <body>
-<h1>🦯 视觉助手</h1>
-<div class="sub">按住大按钮说出你的问题，松开即可</div>
+<h1>🦯 Vision Assist</h1>
+<div class="sub">Hold the big button and ask your question. Release when done.</div>
 
 <div class="settings">
-  <label>摄像头</label>
+  <label>Camera</label>
   <select id="facing">
-    <option value="environment">后置摄像头</option>
-    <option value="user">前置摄像头</option>
+    <option value="environment">Back camera</option>
+    <option value="user">Front camera</option>
   </select>
 </div>
 
 <div class="stage">
-  <button id="btn">按住<br>说话</button>
-  <div id="status">准备就绪</div>
-  <div id="box">这里会显示回答……</div>
+  <button id="btn">Hold to<br>Talk</button>
+  <div id="status">Ready</div>
+  <div id="box">The answer will appear here…</div>
 </div>
 
 <video id="video" autoplay playsinline muted></video>
@@ -93,6 +93,7 @@ let latestFrame = null; // base64 jpeg data url
 let recognition = null;
 let holding = false;
 let busy = false; // an API call in flight
+let isSpeaking = false; // true while TTS is talking, so we pause the mic
 let conversationHistory = []; // cleared each time the button is released
 const MAX_HISTORY_TURNS = 3; // keep last N exchanges (user+model pairs)
 
@@ -100,11 +101,22 @@ function setStatus(t){ statusEl.textContent = t; }
 
 function speak(text){
   try{
+    isSpeaking = true;
+    // pause the mic while we talk, so the phone doesn't hear its own voice
+    if(recognition){ try{ recognition.stop(); }catch(e){} }
     const u = new SpeechSynthesisUtterance(text);
-    u.lang = 'zh-CN';
+    u.lang = 'en-US';
+    const resume = () => {
+      isSpeaking = false;
+      if(holding) startRecognition();
+    };
+    u.onend = resume;
+    u.onerror = resume;
     speechSynthesis.cancel();
     speechSynthesis.speak(u);
-  }catch(e){}
+  }catch(e){
+    isSpeaking = false;
+  }
 }
 
 async function startCamera(){
@@ -136,9 +148,9 @@ function stopCamera(){
 
 function startRecognition(){
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if(!SR){ setStatus('此浏览器不支持语音识别，请使用 Chrome'); return; }
+  if(!SR){ setStatus('This browser does not support speech recognition. Please use Chrome.'); return; }
   recognition = new SR();
-  recognition.lang = 'zh-CN';
+  recognition.lang = 'en-US';
   recognition.continuous = true;
   recognition.interimResults = true;
 
@@ -148,20 +160,21 @@ function startRecognition(){
       if(event.results[i].isFinal){
         finalText += event.results[i][0].transcript;
       } else {
-        setStatus('正在听：' + event.results[i][0].transcript);
+        setStatus('Listening: ' + event.results[i][0].transcript);
       }
     }
     if(finalText.trim()){
       handleUtterance(finalText.trim());
     }
   };
-  recognition.onerror = (e) => { setStatus('语音识别出错：' + e.error); };
+  recognition.onerror = (e) => { setStatus('Speech recognition error: ' + e.error); };
   recognition.onend = () => {
-    if(holding){
+    // don't auto-restart while we're speaking; speak()'s callback restarts it
+    if(holding && !isSpeaking){
       try{ recognition.start(); }catch(e){}
     }
   };
-  try{ recognition.start(); setStatus('正在听你说话…'); }catch(e){}
+  try{ recognition.start(); setStatus('Listening…'); }catch(e){}
 }
 
 function stopRecognition(){
@@ -174,12 +187,12 @@ function stopRecognition(){
 
 async function handleUtterance(text){
   if(busy) return;
-  if(!latestFrame){ setStatus('还未获取到画面，请稍等'); return; }
+  if(!latestFrame){ setStatus('No frame captured yet, please wait'); return; }
   busy = true;
-  setStatus('正在分析画面…');
-  box.textContent = '你说：' + text + '\n\n分析中…';
+  setStatus('Analyzing the scene…');
+  box.textContent = 'You said: ' + text + '\n\nAnalyzing…';
 
-  const prompt = text + '。我是盲人，用一句话给我明确指示。';
+  const prompt = text + '. I am blind. Give me one clear, actionable instruction.';
   const base64Data = latestFrame.split(',')[1]; // strip "data:image/jpeg;base64,"
 
   try{
@@ -194,14 +207,14 @@ async function handleUtterance(text){
     });
     const data = await resp.json();
     if(!resp.ok){
-      const msg = data.detail || '未知错误';
-      box.textContent = '出错了：' + msg;
-      setStatus('请求失败');
-      speak('出错了，' + msg);
+      const msg = data.detail || 'Unknown error';
+      box.textContent = 'Error: ' + msg;
+      setStatus('Request failed');
+      speak('Error. ' + msg);
     } else {
-      const answer = (data.answer || '（没有收到回答）').trim();
-      box.textContent = '你说：' + text + '\n\n回答：' + answer;
-      setStatus(holding ? '正在听你说话…' : '完成');
+      const answer = (data.answer || '(No response received)').trim();
+      box.textContent = 'You said: ' + text + '\n\nAnswer: ' + answer;
+      setStatus(holding ? 'Listening…' : 'Done');
       speak(answer);
 
       // remember this exchange for follow-up questions within the same hold
@@ -214,8 +227,8 @@ async function handleUtterance(text){
       }
     }
   }catch(e){
-    box.textContent = '网络或请求出错：' + e.message;
-    setStatus('请求失败');
+    box.textContent = 'Network or request error: ' + e.message;
+    setStatus('Request failed');
   }
   busy = false;
 }
@@ -226,11 +239,11 @@ async function onHoldStart(e){
   holding = true;
   conversationHistory = []; // new session, forget previous exchanges
   btn.classList.add('active');
-  setStatus('启动摄像头…');
+  setStatus('Starting camera…');
   try{
     await startCamera();
   }catch(err){
-    setStatus('无法访问摄像头：' + err.message);
+    setStatus('Camera access failed: ' + err.message);
     holding = false;
     btn.classList.remove('active');
     return;
@@ -245,7 +258,7 @@ function onHoldEnd(e){
   stopRecognition();
   stopCamera();
   conversationHistory = []; // clear context when the session ends
-  setStatus('已停止');
+  setStatus('Stopped');
 }
 
 btn.addEventListener('mousedown', onHoldStart);
