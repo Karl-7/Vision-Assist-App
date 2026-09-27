@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>视觉助手</title>
+<style>
+:root{
+  --bg:#0b0b10; --fg:#f4f4f6; --accent:#3d8bfd; --accent-active:#e5484d;
+  --card:#16161d; --muted:#9a9aa5;
+}
+*{box-sizing:border-box;}
+html,body{height:100%;margin:0;}
+body{
+  background:var(--bg); color:var(--fg);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  display:flex; flex-direction:column; align-items:center;
+  padding:16px; padding-top:calc(16px + env(safe-area-inset-top,0px));
+  padding-bottom:calc(16px + env(safe-area-inset-bottom,0px));
+  min-height:100%;
+}
+h1{font-size:18px; font-weight:600; margin:8px 0 4px;}
+.sub{color:var(--muted); font-size:13px; margin-bottom:12px; text-align:center;}
+.settings{width:100%; max-width:480px; background:var(--card); border-radius:14px; padding:12px; margin-bottom:14px;}
+.settings label{display:block; font-size:12px; color:var(--muted); margin-bottom:4px;}
+.settings input, .settings select{
+  width:100%; padding:10px; border-radius:8px; border:1px solid #2a2a33;
+  background:#0f0f14; color:var(--fg); font-size:14px; margin-bottom:8px;
+}
+video{display:none;}
+canvas{display:none;}
+.stage{flex:1; width:100%; max-width:480px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:20px;}
+#btn{
+  width:180px; height:180px; border-radius:50%; border:none;
+  background:var(--accent); color:#fff; font-size:20px; font-weight:700;
+  display:flex; align-items:center; justify-content:center; text-align:center;
+  user-select:none; -webkit-user-select:none; touch-action:none;
+  box-shadow:0 0 0 8px rgba(61,139,253,0.15);
+  transition:background .15s, box-shadow .15s, transform .1s;
+}
+#btn.btn-blue{background:var(--accent); box-shadow:0 0 0 8px rgba(51, 130, 249, 0.15);}
+#btn.btn-red{background:var(--accent-active); box-shadow:0 0 0 14px rgba(229,72,77,0.2);}
+#btn.active{transform:scale(0.97);}
+#box{
+  width:100%; min-height:140px; background:var(--card); border-radius:14px;
+  padding:16px; font-size:16px; line-height:1.5; white-space:pre-wrap;
+  overflow-y:auto; max-height:40vh;
+}
+#status{font-size:13px; color:var(--muted); min-height:18px;}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]){ --bg:#f4f4f6; --fg:#111; --card:#fff; --muted:#666; }
+  .settings input,.settings select{ background:#f7f7f9; color:#111; border-color:#ddd; }
+}
+</style>
+</head>
+<body>
+<h1>🦯 视觉助手</h1>
+<div class="sub">按住大按钮说出你的问题，松开即可</div>
+
+<div class="settings">
+  <label>后端地址（部署后端后填入，例如 https://xxx.onrender.com/analyze）</label>
+  <input id="backendUrl" type="text" placeholder="https://your-backend.onrender.com/analyze">
+  <label>摄像头</label>
+  <select id="facing">
+    <option value="environment">后置摄像头</option>
+    <option value="user">前置摄像头</option>
+  </select>
+</div>
+
+<div class="stage">
+  <button id="btn">按住<br>说话</button>
+  <div id="status">准备就绪</div>
+  <div id="box">这里会显示回答……</div>
+</div>
+
+<video id="video" autoplay playsinline muted></video>
+<canvas id="canvas"></canvas>
+
+<script>
+const btn = document.getElementById('btn');
+const box = document.getElementById('box');
+const statusEl = document.getElementById('status');
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const backendUrlInput = document.getElementById('backendUrl');
+const facingSelect = document.getElementById('facing');
+
+// persist settings locally (per-device convenience only)
+try{
+  backendUrlInput.value = localStorage.getItem('va_backend') || '';
+  facingSelect.value = localStorage.getItem('va_facing') || 'environment';
+}catch(e){}
+backendUrlInput.addEventListener('change', ()=>{ try{ localStorage.setItem('va_backend', backendUrlInput.value); }catch(e){} });
+facingSelect.addEventListener('change', ()=>{ try{ localStorage.setItem('va_facing', facingSelect.value); }catch(e){} });
+
+let stream = null;
+let frameTimer = null;
+let latestFrame = null; // base64 jpeg data url
+let recognition = null;
+let holding = false;
+let busy = false; // an API call in flight
+let conversationHistory = []; // cleared each time the button is released
+const MAX_HISTORY_TURNS = 3; // keep last N exchanges (user+model pairs)
+
+function setStatus(t){ statusEl.textContent = t; }
+
+function speak(text){
+  try{
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'zh-CN';
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  }catch(e){}
+}
+
+async function startCamera(){
+  if(stream) return;
+  const facingMode = facingSelect.value;
+  stream = await navigator.mediaDevices.getUserMedia({
+    video:{ facingMode, width:{ideal:640}, height:{ideal:480} },
+    audio:false
+  });
+  video.srcObject = stream;
+  await video.play();
+  frameTimer = setInterval(captureFrame, 1000);
+  captureFrame();
+}
+
+function captureFrame(){
+  if(!video.videoWidth) return;
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  latestFrame = canvas.toDataURL('image/jpeg', 0.6);
+}
+
+function stopCamera(){
+  if(frameTimer){ clearInterval(frameTimer); frameTimer = null; }
+  if(stream){ stream.getTracks().forEach(t=>t.stop()); stream = null; }
+}
+
+function startRecognition(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!SR){ setStatus('此浏览器不支持语音识别，请使用 Chrome'); return; }
+  recognition = new SR();
+  recognition.lang = 'zh-CN';
+  recognition.continuous = true;
+  recognition.interimResults = true;
+
+  recognition.onresult = (event) => {
+    let finalText = '';
+    for(let i = event.resultIndex; i < event.results.length; i++){
+      if(event.results[i].isFinal){
+        finalText += event.results[i][0].transcript;
+      } else {
+        setStatus('正在听：' + event.results[i][0].transcript);
+      }
+    }
+    if(finalText.trim()){
+      handleUtterance(finalText.trim());
+    }
+  };
+  recognition.onerror = (e) => { setStatus('语音识别出错：' + e.error); };
+  recognition.onend = () => {
+    if(holding){
+      try{ recognition.start(); }catch(e){}
+    }
+  };
+  try{ recognition.start(); setStatus('正在听你说话…'); }catch(e){}
+}
+
+function stopRecognition(){
+  if(recognition){
+    recognition.onend = null;
+    try{ recognition.stop(); }catch(e){}
+    recognition = null;
+  }
+}
+
+async function handleUtterance(text){
+  if(busy) return;
+  const backendUrl = backendUrlInput.value.trim();
+  if(!backendUrl){ setStatus('请先填写后端地址'); return; }
+  if(!latestFrame){ setStatus('还未获取到画面，请稍等'); return; }
+  busy = true;
+  setStatus('正在分析画面…');
+  box.textContent = '你说：' + text + '\n\n分析中…';
+
+  const prompt = text + '。我是盲人，用一句话给我明确指示。';
+  const base64Data = latestFrame.split(',')[1]; // strip "data:image/jpeg;base64,"
+
+  try{
+    const resp = await fetch(backendUrl, {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({
+        prompt: prompt,
+        image_base64: base64Data,
+        history: conversationHistory
+      })
+    });
+    const data = await resp.json();
+    if(!resp.ok){
+      const msg = data.detail || '未知错误';
+      box.textContent = '出错了：' + msg;
+      setStatus('请求失败');
+      speak('出错了，' + msg);
+    } else {
+      const answer = (data.answer || '（没有收到回答）').trim();
+      box.textContent = '你说：' + text + '\n\n回答：' + answer;
+      setStatus(holding ? '正在听你说话…' : '完成');
+      speak(answer);
+
+      // remember this exchange for follow-up questions within the same hold
+      conversationHistory.push({ role:'user', text: prompt });
+      conversationHistory.push({ role:'model', text: answer });
+      // keep only the last MAX_HISTORY_TURNS exchanges (2 entries per exchange)
+      const maxEntries = MAX_HISTORY_TURNS * 2;
+      if(conversationHistory.length > maxEntries){
+        conversationHistory = conversationHistory.slice(conversationHistory.length - maxEntries);
+      }
+    }
+  }catch(e){
+    box.textContent = '网络或请求出错：' + e.message;
+    setStatus('请求失败');
+  }
+  busy = false;
+}
+
+async function onHoldStart(e){
+  e.preventDefault();
+  if(holding) return;
+  holding = true;
+  conversationHistory = []; // new session, forget previous exchanges
+  btn.classList.add('active');
+  setStatus('启动摄像头…');
+  try{
+    await startCamera();
+  }catch(err){
+    setStatus('无法访问摄像头：' + err.message);
+    holding = false;
+    btn.classList.remove('active');
+    return;
+  }
+  startRecognition();
+}
+
+function onHoldEnd(e){
+  if(!holding) return;
+  holding = false;
+  btn.classList.remove('active');
+  stopRecognition();
+  stopCamera();
+  conversationHistory = []; // clear context when the session ends
+  setStatus('已停止');
+}
+
+async function toggleHold(e){
+  e.preventDefault();
+  if(holding){
+    onHoldEnd(e);
+  }else{
+    await onHoldStart(e);
+  }
+}
+
+btn.addEventListener('click', toggleHold);
+</script>
+</body>
+</html>
+
+ rmdir /s /q .git git init git add index.html git commit -m "Frontend only, clean history" git branch -M main git remote add origin https://github.com/Karl-7/Vision-Assist-App.git git push -f origin main
